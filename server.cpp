@@ -27,6 +27,7 @@ void unimplemented(int sockfd);
 void err_file(int sockfd);
 void send_file(int sockfd, const char *path);
 void execute_cgi(int sockfd, const char *path, const char *parameter);
+void err_sys(const char *err);
 
 void thread_make(int i)
 {
@@ -211,6 +212,12 @@ void send_file(int sockfd, const char *path)
 	fclose(file);
 }
 
+void err_sys(const char *err)
+{
+	perror(err);
+	exit(0);
+}
+
 int main(void)
 {
 	/*实际使用时取消下一行的注释，使其成为守护进程*/
@@ -219,12 +226,25 @@ int main(void)
 	struct sockaddr_in cliaddr;
 	socklen_t clilen = sizeof(cliaddr);
 	listenfd = socket(AF_INET, SOCK_STREAM, 0);
+	if(listenfd < 0)
+	{
+		err_sys("socket error");
+	}
+	
 	bzero(&cliaddr, sizeof(cliaddr));
 	cliaddr.sin_family = AF_INET;
 	cliaddr.sin_addr.s_addr = htonl(INADDR_ANY);
 	cliaddr.sin_port = htons(80);
-	bind(listenfd, (struct sockaddr*) &cliaddr, clilen);
-	listen(listenfd, MAXLISTEN);
+	if( bind(listenfd, (struct sockaddr*) &cliaddr, clilen) < 0)
+	{
+		err_sys("bind error");
+	}
+	
+	if( listen(listenfd, MAXLISTEN) < 0)
+	{
+		err_sys("listen error");
+	}
+	
 	
 	iget = iput = 0;
 	
@@ -235,6 +255,11 @@ int main(void)
 	while(1)
 	{
 		connfd = accept(listenfd, (struct sockaddr*) &cliaddr, &clilen);
+		if(connfd < 0)
+		{
+			err_sys("accept error");
+		}
+		
 		pthread_mutex_lock(&clifd_mutex);
 		
 		clifd[iput] = connfd;
