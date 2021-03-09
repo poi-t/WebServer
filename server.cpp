@@ -14,6 +14,7 @@
 #define NTHREADS 4
 #define MAXNCLI 8
 #define MAXLISTEN 4
+
 pthread_t thread[NTHREADS];
 int clifd[MAXNCLI];
 int iget, iput;
@@ -28,13 +29,16 @@ void err_file(int sockfd);
 void send_file(int sockfd, const char *path);
 void execute_cgi(int sockfd, const char *path, const char *parameter);
 void err_sys(const char *err);
+int readline(int sockfd, char *buf, int size);
 
+/*线程创建函数*/ 
 void thread_make(int i)
 {
 	pthread_create(&thread[i], NULL, &thread_main, NULL);
 	return;
 }
 
+/*线程主函数，连接到来时被唤醒以继续后续工作*/ 
 void* thread_main(void* t)
 {
 	int connfd;
@@ -58,6 +62,7 @@ void* thread_main(void* t)
 	}
 }
 
+/*读取HTTP报文并进行处理*/ 
 void web_server(int sockfd)
 {
 	char buf[1024];
@@ -65,7 +70,7 @@ void web_server(int sockfd)
 	char url[512];
 	char path[512];
 	int i = 0, j = 0, num = 0;
-	num = read(sockfd, buf, sizeof(buf));
+	num = readline(sockfd, buf, sizeof(buf));
 	while (!isspace(buf[i]) && (i < sizeof(method) - 1))
 	{
 		method[i] = buf[i];
@@ -218,6 +223,40 @@ void err_sys(const char *err)
 	exit(0);
 }
 
+int readline(int sockfd, char *buf, int size)
+{
+	int i = 0, n = 0;
+	char c = '\0';
+
+	while ((i < size - 1) && (c != '\n'))
+	{
+		n = recv(sock, &c, 1, 0);
+		if (n > 0)
+		{
+			if (c == '\r')
+			{
+				n = recv(sock, &c, 1, MSG_PEEK);//查看数据且数据仍留在接收队列中 
+				if ((n > 0) && (c == '\n'))
+				{
+					recv(sock, &c, 1, 0);
+				}
+				else
+				{
+					c = '\n';
+				}
+			}
+			buf[i] = c;
+			i++;
+		}
+		else
+		{
+			break;
+		}
+	}
+	buf[i] = '\0';
+	return(i);
+}
+
 int main(void)
 {
 	/*实际使用时取消下一行的注释，使其成为守护进程*/
@@ -225,7 +264,9 @@ int main(void)
 	int listenfd, connfd;
 	struct sockaddr_in cliaddr;
 	socklen_t clilen = sizeof(cliaddr);
+	
 	listenfd = socket(AF_INET, SOCK_STREAM, 0);
+	
 	if(listenfd < 0)
 	{
 		err_sys("socket error");
@@ -235,6 +276,7 @@ int main(void)
 	cliaddr.sin_family = AF_INET;
 	cliaddr.sin_addr.s_addr = htonl(INADDR_ANY);
 	cliaddr.sin_port = htons(80);
+	
 	if( bind(listenfd, (struct sockaddr*) &cliaddr, clilen) < 0)
 	{
 		err_sys("bind error");
@@ -245,13 +287,13 @@ int main(void)
 		err_sys("listen error");
 	}
 	
-	
 	iget = iput = 0;
 	
-	for(int i = 0; i < NTHREADS; ++i)
+	for(int i = 0; i < NTHREADS; ++i)//创建线程，投入线程池 
 	{
 		thread_make(i);
 	}
+	
 	while(1)
 	{
 		connfd = accept(listenfd, (struct sockaddr*) &cliaddr, &clilen);
@@ -267,8 +309,10 @@ int main(void)
 		{
 			iput = 0;
 		}
+		
 		while(iput == iget)
 		{
+			/*无可用线程，暂时睡眠*/ 
 			pthread_cond_signal(&clifd_cond);
 			pthread_mutex_unlock(&clifd_mutex);
 			sleep(1);
