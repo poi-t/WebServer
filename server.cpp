@@ -26,6 +26,7 @@ void* thread_main(void*);
 void web_server(int sockfd);
 void unimplemented(int sockfd);
 void err_file(int sockfd);
+void server_error(int sockfd);
 void send_file(int sockfd, const char *path);
 void execute_cgi(int sockfd, const char *path, const char *parameter);
 void err_sys(const char *err);
@@ -187,9 +188,88 @@ void err_file(int sockfd)
 	send(sockfd, buf, strlen(buf), 0);
 }
 
+void server_error(int sockfd)
+{
+    char buf[1024];
+    
+    sprintf(buf, "HTTP/1.0 500 Internal Server Error\r\n");
+	send(sockfd, buf, strlen(buf), 0);
+	sprintf(buf, "Content-Type: text/html\r\n");
+	send(sockfd, buf, strlen(buf), 0);
+	sprintf(buf, "Connection: close\r\n\r\n");
+	send(sockfd, buf, strlen(buf), 0);
+	sprintf(buf, "<html>\r\n");
+	send(sockfd, buf, strlen(buf), 0);
+	sprintf(buf, "<head><title>500 Internal Server Error</title></head>\r\n");
+	send(sockfd, buf, strlen(buf), 0);
+	sprintf(buf, "<body bgcolor=\"white\">\r\n");
+	send(sockfd, buf, strlen(buf), 0);
+	sprintf(buf, "<div style=\"text-align:center;\">500 Internal Server Error</div>\r\n");
+	send(sockfd, buf, strlen(buf), 0);
+	sprintf(buf, "</body>\r\n");
+	send(sockfd, buf, strlen(buf), 0);
+	sprintf(buf, "<html>\r\n");
+	send(sockfd, buf, strlen(buf), 0);
+}
+
 void execute_cgi(int sockfd, const char *path, const char *parameter)
 {
-	return;
+	char buf[1024];
+	int output[2], input[2];
+	pid_t pid;
+	char c;
+	
+	if (pipe(output) < 0) 
+	{
+        server_error(sockfd);
+        return;
+    }
+    if (pipe(input) < 0) 
+	{
+        server_error(sockfd);
+        return;
+    }
+    if ((pid = fork()) < 0 ) 
+	{
+        server_error(sockfd);
+        return;
+    }
+	
+	if(pid == 0)
+	{
+		/*子进程*/ 
+		char meth_env[255];
+		char query_env[255];
+		dup2(output[1], STDOUT);
+		dup2(input[0], STDIN);
+		close(output[0]);
+		close(input[1]);
+		
+		/*设置环境变量*/ 
+		sprintf(meth_env, "REQUEST_METHOD=GET");
+		putenv(meth_env);
+		sprintf(query_env, "QUERY_STRING=%s", parameter);
+		putenv(query_env);
+		
+		execl(path, NULL);
+		exit(0);
+	}
+	else
+	{
+		/*父进程*/ 
+		close(output[1]);
+		close(input[0]);
+		
+		sprintf(buf, "HTTP/1.0 200 OK\r\n");
+		send(client, buf, strlen(buf), 0);
+		while (read(output[0], &c, 1) > 0)
+		{
+			send(client, &c, 1, 0);
+		}
+		close(output[0]);
+		close(input[1]);
+		waitpid(pid, NULL, 0);
+	}
 }
 
 void send_file(int sockfd, const char *path)
