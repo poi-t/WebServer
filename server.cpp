@@ -4,6 +4,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <strings.h>
@@ -30,7 +31,6 @@ void server_error(int sockfd);
 void send_file(int sockfd, const char *path);
 void execute_cgi(int sockfd, const char *path, const char *parameter);
 void err_sys(const char *err);
-int readline(int sockfd, char *buf, int size);
 
 /*线程创建函数*/ 
 void thread_make(int i)
@@ -71,7 +71,7 @@ void web_server(int sockfd)
 	char url[512];
 	char path[512];
 	int i = 0, j = 0, num = 0;
-	num = readline(sockfd, buf, sizeof(buf));
+	num = read(sockfd, buf, sizeof(buf));
 	while (!isspace(buf[i]) && (i < sizeof(method) - 1))
 	{
 		method[i] = buf[i];
@@ -240,8 +240,8 @@ void execute_cgi(int sockfd, const char *path, const char *parameter)
 		/*子进程*/ 
 		char meth_env[255];
 		char query_env[255];
-		dup2(output[1], STDOUT);
-		dup2(input[0], STDIN);
+		dup2(output[1], 1);
+		dup2(input[0], 0);
 		close(output[0]);
 		close(input[1]);
 		
@@ -261,10 +261,10 @@ void execute_cgi(int sockfd, const char *path, const char *parameter)
 		close(input[0]);
 		
 		sprintf(buf, "HTTP/1.0 200 OK\r\n");
-		send(client, buf, strlen(buf), 0);
+		send(sockfd, buf, strlen(buf), 0);
 		while (read(output[0], &c, 1) > 0)
 		{
-			send(client, &c, 1, 0);
+			send(sockfd, &c, 1, 0);
 		}
 		close(output[0]);
 		close(input[1]);
@@ -301,40 +301,6 @@ void err_sys(const char *err)
 {
 	perror(err);
 	exit(0);
-}
-
-int readline(int sockfd, char *buf, int size)
-{
-	int i = 0, n = 0;
-	char c = '\0';
-
-	while ((i < size - 1) && (c != '\n'))
-	{
-		n = recv(sock, &c, 1, 0);
-		if (n > 0)
-		{
-			if (c == '\r')
-			{
-				n = recv(sock, &c, 1, MSG_PEEK);//查看数据且数据仍留在接收队列中 
-				if ((n > 0) && (c == '\n'))
-				{
-					recv(sock, &c, 1, 0);
-				}
-				else
-				{
-					c = '\n';
-				}
-			}
-			buf[i] = c;
-			i++;
-		}
-		else
-		{
-			break;
-		}
-	}
-	buf[i] = '\0';
-	return(i);
 }
 
 int main(void)
