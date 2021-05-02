@@ -42,17 +42,6 @@ void modfd(int epollfd, int fd, int ev) {
     epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event);
 }
 
-//关闭连接，由于主线程也可能调用此函数，需要对用户数加锁
-void http_conn::close_conn() {
-    if(m_sockfd != -1) {
-        removefd(m_epollfd, m_sockfd);
-        m_sockfd = -1;
-        user_count_lock.lock();
-        m_user_count--;
-        user_count_lock.unlock();
-    }
-}
-
 //初始化连接,外部调用初始化套接字地址
 void http_conn::init(int sockfd, const sockaddr_in& addr) {
     m_sockfd = sockfd;
@@ -64,9 +53,15 @@ void http_conn::init(int sockfd, const sockaddr_in& addr) {
     init();//初始化其他部分
 }
 
-//获取一行数据
-char* http_conn::get_line() {
-    return m_read_buf + m_start_line;
+//关闭连接，由于主线程也可能调用此函数，需要对用户数加锁
+void http_conn::close_conn() {
+    if(m_sockfd != -1) {
+        removefd(m_epollfd, m_sockfd);
+        m_sockfd = -1;
+        user_count_lock.lock();
+        m_user_count--;
+        user_count_lock.unlock();
+    }
 }
 
 //一次性读出所有数据,循环读取客户数据，直到无数据可读或对方关闭连接
@@ -95,6 +90,218 @@ bool http_conn::readall() {
     }
     return true;
 }
+
+//一次性写完数据
+bool http_conn::writeall(){
+    int ret = 0;
+    if(bytes_to_send == 0) {
+        // 将要发送的字节为0，这一次响应结束
+        return write_end();
+    }
+
+    while(1) {
+        //发送写缓冲区中数据
+        ret = write(m_sockfd, m_write_buf + bytes_have_send, m_write_idx - bytes_have_send);
+        if(ret == -1) {
+            if(m_file_idx != 0) {
+                unmap();
+            }
+            return false;
+        }
+        bytes_have_send += ret;
+        bytes_to_send -= ret;
+        if(bytes_have_send == m_write_idx) {
+            break;
+        }
+    }
+
+    if(bytes_to_send == 0) {
+        return write_end();
+    }
+
+    int m_file_send = 0;
+    while(1) {
+        //发送文件
+        ret = write(m_sockfd, m_file_address + m_file_send, m_file_idx - m_file_send);
+        if(ret == -1) {
+            unmap();
+            return false;
+        }
+        bytes_have_send += ret;
+        bytes_to_send -= ret;
+        m_file_send += ret;
+        if(bytes_to_send == 0) {
+            unmap();
+            return write_end();
+        }
+    }
+
+}
+
+//由线程池中的工作线程调用，这是处理HTTP请求的入口函数
+void http_conn::process() {
+    //解析HTTP请求
+    HTTP_CODE read_ret = process_read();
+    if(read_ret == PROCESSING) {
+        modfd(m_epollfd, m_sockfd, EPOLLIN);
+        return;
+    }
+
+    // 生成响应
+    bool write_ret = process_write( read_ret );
+    if (!write_ret) {
+        close_conn();
+    }
+    modfd(m_epollfd, m_sockfd, EPOLLOUT);
+}
+
+
+//内部相关变量初始化
+void http_conn::init() {
+    m_check_state = CHECK_REQUEST_LINE;//初始化状态为解析请求首行
+    bytes_to_send = 0;
+    bytes_have_send = 0;
+    m_linger = false;       
+    m_method = GET;         
+    m_content_length = 0;
+    m_host = NULL;
+    m_start_line = 0;
+    m_read_idx = 0;
+    m_write_idx = 0;
+    m_file_idx = 0;
+    m_checked_idx = 0;
+    m_write_idx = 0;
+
+    bzero(m_read_buf, READ_BUF_SIZE);
+    bzero(m_write_buf, READ_BUF_SIZE);
+    bzero(m_real_file, FILENAME_LEN);
+    bzero(m_url, URL_LEN);
+}
+
+//主状态机，解析请求
+http_conn::HTTP_CODE http_conn::process_read() {
+    LINE_STATUS line_status = LINE_OK;
+    HTTP_CODE ret = PROCESSING;
+    char* text = 0;
+    while((m_check_state == CHECK_ENTITY && line_status == LINE_OK) || ((line_status = parse_line()) == LINE_OK)) {
+        //解析到了一行完整的数据，或者解析到来请求体，也为一行完整数据
+        //获取一行数据
+        text = get_line();
+        m_start_line = m_checked_idx;
+
+        switch (m_check_state) {
+            case CHECK_REQUEST_LINE: {
+                ret = parse_request_line(text);
+                if(ret == BAD_REQUEST) {
+                    return BAD_REQUEST;
+                } else if(ret == UNIMPLEMENTED) {
+                    return UNIMPLEMENTED;
+                }
+                break;
+            }
+
+            case CHECK_HEADER: {
+                ret = parse_headers(text);
+                if(ret == BAD_REQUEST) {
+                    return BAD_REQUEST;
+                } else if(ret == GET_REQUEST) {
+                    return do_request();
+                }
+                break;
+            }
+            
+            case CHECK_ENTITY: {
+                ret = parse_entity(text);
+                if(ret == GET_REQUEST) {
+                    return do_request();
+                }
+                line_status = LINE_INCOMPLETE;
+                break;
+            }
+
+            default: {
+                return INTERNAL_ERROR;
+                break;
+            }
+        }
+    }
+    return PROCESSING;
+}
+
+// 根据服务器处理HTTP请求的结果，决定返回给客户端的内容
+bool http_conn::process_write(HTTP_CODE ret) {
+    switch (ret) {
+        case INTERNAL_ERROR: {
+            const char* error_500 =  "Internal Server Error";
+            add_status_line(500, error_500);
+            add_headers(err_information_len + 2 * strlen(error_500));
+            if (!add_entity(error_500)) {
+                return false;
+            }
+            break;
+        }
+
+        case BAD_REQUEST: {
+            const char* error_400 = "Bad Request";
+            add_status_line(400, error_400);
+            add_headers(err_information_len + 2 * strlen(error_400));
+            if (!add_entity(error_400)) {
+                return false;
+            }
+            break;
+        }
+
+        case NO_RESOURCE: {
+            const char* error_404 = "NOT FOUND";
+            add_status_line(404, error_404);
+            add_headers(err_information_len + 2 * strlen(error_404));
+            if (!add_entity(error_404)) {
+                return false;
+            }
+            break;
+        }
+
+        case FORBIDDEN_REQUEST: {
+            const char* error_403 = "Forbidden";
+            add_status_line(403, error_403);
+            add_headers(err_information_len + 2 * strlen(error_403));
+            if (!add_entity(error_403)) {
+                return false;
+            }
+            break;
+        }
+
+        case FILE_REQUEST: {
+            const char* ok_200 = "OK";
+            add_status_line(200, ok_200);
+            add_headers(m_file_stat.st_size);
+            m_file_idx = m_file_stat.st_size;
+            bytes_to_send = m_write_idx + m_file_idx;
+            return true;
+        }
+
+        case UNIMPLEMENTED : {
+            const char* error_501 = "Method Not Implemented";
+            add_status_line(403, error_501);
+            add_headers(err_information_len + 2 * strlen(error_501));
+            if (!add_entity(error_501)) {
+                return false;
+            }
+            break;
+        }
+        default: {
+            return false;
+        }
+    }
+    bytes_to_send = m_write_idx;
+    return true;
+}
+
+//获取一行数据
+char* http_conn::get_line() {
+    return m_read_buf + m_start_line;
+}
+
 
 //解析一行，依据\r\n为结尾
 http_conn::LINE_STATUS http_conn::parse_line() {
@@ -209,80 +416,6 @@ http_conn::HTTP_CODE http_conn::parse_entity(char* text) {
     return PROCESSING;
 }
 
-//主状态机，解析请求
-http_conn::HTTP_CODE http_conn::process_read() {
-    LINE_STATUS line_status = LINE_OK;
-    HTTP_CODE ret = PROCESSING;
-    char* text = 0;
-    while((m_check_state == CHECK_ENTITY && line_status == LINE_OK) || ((line_status = parse_line()) == LINE_OK)) {
-        //解析到了一行完整的数据，或者解析到来请求体，也为一行完整数据
-        //获取一行数据
-        text = get_line();
-        m_start_line = m_checked_idx;
-
-        switch (m_check_state) {
-            case CHECK_REQUEST_LINE: {
-                ret = parse_request_line(text);
-                if(ret == BAD_REQUEST) {
-                    return BAD_REQUEST;
-                } else if(ret == UNIMPLEMENTED) {
-                    return UNIMPLEMENTED;
-                }
-                break;
-            }
-
-            case CHECK_HEADER: {
-                ret = parse_headers(text);
-                if(ret == BAD_REQUEST) {
-                    return BAD_REQUEST;
-                } else if(ret == GET_REQUEST) {
-                    return do_request();
-                }
-                break;
-            }
-            
-            case CHECK_ENTITY: {
-                ret = parse_entity(text);
-                if(ret == GET_REQUEST) {
-                    return do_request();
-                }
-                line_status = LINE_INCOMPLETE;
-                break;
-            }
-
-            default: {
-                return INTERNAL_ERROR;
-                break;
-            }
-        }
-    }
-    return PROCESSING;
-}
-
-
-//内部相关变量初始化
-void http_conn::init() {
-    m_check_state = CHECK_REQUEST_LINE;//初始化状态为解析请求首行
-    bytes_to_send = 0;
-    bytes_have_send = 0;
-    m_linger = false;       
-    m_method = GET;         
-    m_content_length = 0;
-    m_host = NULL;
-    m_start_line = 0;
-    m_read_idx = 0;
-    m_write_idx = 0;
-    m_file_idx = 0;
-    m_checked_idx = 0;
-    m_write_idx = 0;
-
-    bzero(m_read_buf, READ_BUF_SIZE);
-    bzero(m_write_buf, READ_BUF_SIZE);
-    bzero(m_real_file, FILENAME_LEN);
-    bzero(m_url, URL_LEN);
-}
-
-
 // 当得到一个完整、正确的HTTP请求时就分析目标文件的属性，如果目标文件存在、对所有用户可读，
 // 且不是目录，则使用mmap将其映射到内存地址m_file_address处，并告知调用者获取文件成功
 http_conn::HTTP_CODE http_conn::do_request() {
@@ -319,71 +452,12 @@ http_conn::HTTP_CODE http_conn::do_request() {
     return FILE_REQUEST;
 }
 
-
-
 // 对内存映射区执行munmap操作
 void http_conn::unmap() {
     if(m_file_address) {
         munmap(m_file_address, m_file_stat.st_size);
         m_file_address = 0;
     }
-}
-
-bool http_conn::write_end() {
-    modfd(m_epollfd, m_sockfd, EPOLLIN);
-    if(m_linger) {
-        init();
-        return true;
-    } else {
-        return false;
-    }
-}
-
-//一次性写完数据
-bool http_conn::writeall(){
-    int ret = 0;
-    if(bytes_to_send == 0) {
-        // 将要发送的字节为0，这一次响应结束
-        return write_end();
-    }
-
-    while(1) {
-        //发送写缓冲区中数据
-        ret = write(m_sockfd, m_write_buf + bytes_have_send, m_write_idx - bytes_have_send);
-        if(ret == -1) {
-            if(m_file_idx != 0) {
-                unmap();
-            }
-            return false;
-        }
-        bytes_have_send += ret;
-        bytes_to_send -= ret;
-        if(bytes_have_send == m_write_idx) {
-            break;
-        }
-    }
-
-    if(bytes_to_send == 0) {
-        return write_end();
-    }
-
-    int m_file_send = 0;
-    while(1) {
-        //发送文件
-        ret = write(m_sockfd, m_file_address + m_file_send, m_file_idx - m_file_send);
-        if(ret == -1) {
-            unmap();
-            return false;
-        }
-        bytes_have_send += ret;
-        bytes_to_send -= ret;
-        m_file_send += ret;
-        if(bytes_to_send == 0) {
-            unmap();
-            return write_end();
-        }
-    }
-
 }
 
 // 往写缓冲中写入待发送的数据
@@ -407,7 +481,7 @@ bool http_conn::add_status_line(int status, const char* title) {
 }
 
 bool http_conn::add_headers(int content_len) {
-    add_response("Server: %s\r\n", m_host);
+    add_response("Server: HttpServer\r\n");
     add_response("Content-Length: %d\r\n", content_len);
     add_response("Connection: %s\r\n", ( m_linger == true ) ? "keep-alive" : "close");
     add_response("Content-Type:%s\r\n", "text/html");
@@ -425,89 +499,12 @@ bool http_conn::add_entity( const char* content ) {
     return true;
 }
 
-//由线程池中的工作线程调用，这是处理HTTP请求的入口函数
-void http_conn::process() {
-    //解析HTTP请求
-    HTTP_CODE read_ret = process_read();
-    if(read_ret == PROCESSING) {
-        modfd(m_epollfd, m_sockfd, EPOLLIN);
-        return;
+bool http_conn::write_end() {
+    modfd(m_epollfd, m_sockfd, EPOLLIN);
+    if(m_linger) {
+        init();
+        return true;
+    } else {
+        return false;
     }
-
-    // 生成响应
-    bool write_ret = process_write( read_ret );
-    if (!write_ret) {
-        close_conn();
-    }
-    modfd(m_epollfd, m_sockfd, EPOLLOUT);
 }
-
-// 根据服务器处理HTTP请求的结果，决定返回给客户端的内容
-bool http_conn::process_write(HTTP_CODE ret) {
-    switch (ret) {
-        case INTERNAL_ERROR: {
-            const char* error_500 =  "Internal Server Error";
-            add_status_line(500, error_500);
-            add_headers(err_information_len + 2 * strlen(error_500));
-            if (!add_entity(error_500)) {
-                return false;
-            }
-            break;
-        }
-
-        case BAD_REQUEST: {
-            const char* error_400 = "Bad Request";
-            add_status_line(400, error_400);
-            add_headers(err_information_len + 2 * strlen(error_400));
-            if (!add_entity(error_400)) {
-                return false;
-            }
-            break;
-        }
-
-        case NO_RESOURCE: {
-            const char* error_404 = "NOT FOUND";
-            add_status_line(404, error_404);
-            add_headers(err_information_len + 2 * strlen(error_404));
-            if (!add_entity(error_404)) {
-                return false;
-            }
-            break;
-        }
-
-        case FORBIDDEN_REQUEST: {
-            const char* error_403 = "Forbidden";
-            add_status_line(403, error_403);
-            add_headers(err_information_len + 2 * strlen(error_403));
-            if (!add_entity(error_403)) {
-                return false;
-            }
-            break;
-        }
-
-        case FILE_REQUEST: {
-            const char* ok_200 = "OK";
-            add_status_line(200, ok_200);
-            add_headers(m_file_stat.st_size);
-            m_file_idx = m_file_stat.st_size;
-            bytes_to_send = m_write_idx + m_file_idx;
-            return true;
-        }
-
-        case UNIMPLEMENTED : {
-            const char* error_501 = "Method Not Implemented";
-            add_status_line(403, error_501);
-            add_headers(err_information_len + 2 * strlen(error_501));
-            if (!add_entity(error_501)) {
-                return false;
-            }
-            break;
-        }
-        default: {
-            return false;
-        }
-    }
-    bytes_to_send = m_write_idx;
-    return true;
-}
-

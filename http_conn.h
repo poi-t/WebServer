@@ -61,12 +61,12 @@ private:
     bool process_write(HTTP_CODE ret);                   //填充HTTP应答
 
     // 下面这一组函数被process_read调用以分析HTTP请求
+    char* get_line();                                    //获取一行数据
+    LINE_STATUS parse_line();                            //解析一行数据，依据\r\n为结尾
     HTTP_CODE parse_request_line(char* text);            //解析请求行
     HTTP_CODE parse_headers(char* text);                 //解析请求头
     HTTP_CODE parse_entity(char* text);                  //解析请求实体
     HTTP_CODE do_request();                              //解析文件
-    LINE_STATUS parse_line();                            //解析一行数据，依据\r\n为结尾
-    char* get_line();                                    //获取一行数据
     
     // 这一组函数被process_write调用以填充HTTP应答
     void unmap();                                        //对内存映射区执行munmap操作
@@ -74,6 +74,7 @@ private:
     bool add_status_line(int status, const char* title); //写入状态行
     bool add_headers(int content_length);                //写入响应头
     bool add_entity(const char* content);                //写入响应实体
+    
     bool write_end();                                    //一次写结束的最终操作
 
     static const int FILENAME_LEN = 512;                 //文件名最大长度
