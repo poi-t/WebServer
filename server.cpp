@@ -13,8 +13,9 @@
 #include "http_conn.h"
 #include "thread_pool.h"
 
-#define MAX_FD 65536           //最大的文件描述符个数
-#define MAX_EVENT_NUMBER  5000//监听的最大的事件数量
+static const int MAX_FD = 65536;          //最大的文件描述符个数
+static const int MAX_EVENT_NUMBER = 5000; //监听的最大的事件数量
+static const int PORT = 80;               //服务器监听端口
 
 /*添加信号捕捉*/
 void addsig(int sig, void(handler)(int)) {
@@ -34,13 +35,14 @@ void err_sys(const char *err)
 
 //添加文件描述符到epoll中
 extern void addfd(int epolled, int fd, bool one_shot);
+
 //从epoll中删除文件描述符
 extern void removefd(int epollfd, int fd);
+
 //从epoll中修改文件描述符
 extern void modfd(int epollfd, int fd, int ev);
 
 int main() {
-
     //对SGIPIPE信号进行处理
     addsig(SIGPIPE, SIG_IGN);
 
@@ -70,7 +72,6 @@ int main() {
     int reuse = 1;
     setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
-    int PORT = 80;
     //绑定
     struct sockaddr_in address;
     address.sin_family = AF_INET;
