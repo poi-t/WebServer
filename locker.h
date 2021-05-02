@@ -28,9 +28,6 @@ public:
         return pthread_mutex_unlock(&m_mutex) == 0;
     }
 
-    pthread_mutex_t* get() {
-        return &m_mutex;
-    }
 private:
     pthread_mutex_t m_mutex;
 };
