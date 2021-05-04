@@ -12,10 +12,13 @@
 #include "locker.h"
 #include "http_conn.h"
 #include "thread_pool.h"
+#include "timeout.h"
 
-static const int MAX_FD = 65536;          //最大的文件描述符个数
+static const int MAX_FD = 10000;          //最大的文件描述符个数
 static const int MAX_EVENT_NUMBER = 5000; //监听的最大的事件数量
 static const int PORT = 80;               //服务器监听端口
+static const int TIMEOUT = 10;            //调用alarm函数的时间间隔
+timer_list<http_conn> t_list;
 
 /*添加信号捕捉*/
 void addsig(int sig, void(handler)(int)) {
@@ -24,6 +27,12 @@ void addsig(int sig, void(handler)(int)) {
     sa.sa_handler = handler;
     sigfillset(&sa.sa_mask);
     sigaction(sig, &sa, NULL);
+}
+
+//SIGALRM信号处理函数，既删除超时链接
+void timeout_handle(int sig) {
+    t_list.delete_timeout();
+    alarm(TIMEOUT);
 }
 
 //错误处理
@@ -43,8 +52,11 @@ extern void removefd(int epollfd, int fd);
 extern void modfd(int epollfd, int fd, int ev);
 
 int main() {
-    //对SGIPIPE信号进行处理
+    daemon(1,0); 
+
+    //对SGIPIPE信号和SIGALRM信号进行处理
     addsig(SIGPIPE, SIG_IGN);
+    addsig(SIGALRM, timeout_handle);
 
     //创建线程池， 初始化线程池
     threadpool<http_conn>* pool = NULL;
@@ -85,7 +97,7 @@ int main() {
         err_sys("listen");
     }
     
-    //创建epoll对象，事件数组，添加
+    //创建epoll对象和事件数组
     epoll_event events[MAX_EVENT_NUMBER];
     int epollfd = epoll_create(1);
 
@@ -109,24 +121,36 @@ int main() {
                 if(connfd == -1) {
                     continue;
                 }
-                if(http_conn::m_user_count >= MAX_FD) {
+                if(http_conn::m_user_count >= MAX_FD || connfd >= MAX_FD) {
                     close(connfd);
                     continue;
                 }
                 //将新的客户的数据初始化，放到数组中
                 users[connfd].init(connfd, client_address);
+                //创建对应的一个定时器加入链表
+                t_list.set_time(connfd, users + connfd);
             } else if(events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
                 //对方异常断开或者错误
+                t_list.delete_timer(sockfd);
                 users[sockfd].close_conn();
             } else if(events[i].events & EPOLLIN) {
                 if(users[sockfd].readall()) {
                     //一次性读完
-                    pool->append(users + sockfd);
+                    if(pool->append(users + sockfd)) {
+                        t_list.set_time(sockfd, users + sockfd);
+                    } else {
+                        t_list.delete_timer(sockfd);
+                        users[sockfd].close_conn();
+                    }
                 } else {
+                    t_list.delete_timer(sockfd);
                     users[sockfd].close_conn();
                 }
             } else if(events[i].events & EPOLLOUT) {
-                if( !users[sockfd].writeall()) {
+                if(users[sockfd].writeall()) {
+                    t_list.set_time(sockfd, users + sockfd);
+                } else {
+                    t_list.delete_timer(sockfd);
                     users[sockfd].close_conn();
                 }
             }
@@ -137,5 +161,6 @@ int main() {
     close(listenfd);
     delete [] users;
     delete pool;
+    t_list.delete_all();
     return 0;
 } 
