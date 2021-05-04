@@ -1,9 +1,10 @@
 #include "http_conn.h"
+#include "timeout.h"
 
 int http_conn::m_epollfd = -1;
 int http_conn::m_user_count = 0;
 const char* resources_dir = "/root/HttpServer/resources";  //网站资源目录；
-
+extern timer_list<http_conn> t_list;
 
 //设置文件描述符非阻塞
 int setnoblocking(int fd) {
@@ -54,14 +55,19 @@ void http_conn::init(int sockfd, const sockaddr_in& addr) {
 }
 
 //关闭连接，由于主线程也可能调用此函数，需要对用户数加锁
-void http_conn::close_conn() {
+int http_conn::close_conn() {
+    int ret = m_sockfd;
     if(m_sockfd != -1) {
-        removefd(m_epollfd, m_sockfd);
-        m_sockfd = -1;
         user_count_lock.lock();
-        m_user_count--;
+        if(m_sockfd != -1) {
+            removefd(m_epollfd, m_sockfd);
+            m_sockfd = -1;
+            m_user_count--;
+        }
         user_count_lock.unlock();
     }
+    printf("close fd : %d \n", ret);
+    return ret;
 }
 
 //一次性读出所有数据,循环读取客户数据，直到无数据可读或对方关闭连接
@@ -150,6 +156,7 @@ void http_conn::process() {
     // 生成响应
     bool write_ret = process_write( read_ret );
     if (!write_ret) {
+        t_list.delete_timer(m_sockfd);
         close_conn();
     }
     modfd(m_epollfd, m_sockfd, EPOLLOUT);
