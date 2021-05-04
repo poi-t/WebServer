@@ -25,7 +25,7 @@ public:
     http_conn() {}
     ~http_conn() {}
     void init(int sockfd, const sockaddr_in& addr);      //初始化新接收的连接
-    void close_conn();                                   //关闭连接
+    int close_conn();                                   //关闭连接
     bool readall();                                      //一次性读入数据
     bool writeall();                                     //一次性写出数据
     void process();                                      //处理客户端请求
