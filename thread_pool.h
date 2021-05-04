@@ -10,7 +10,7 @@
 template<typename T>
 class threadpool {
 public:
-    threadpool(int thread_number = 8, int max_requests = 5000);
+    threadpool(int thread_number = 8, int max_requests = 3000);
     ~threadpool();
     bool append(T* request);         //添加任务
     
@@ -31,7 +31,7 @@ private:
 template<typename T>
 threadpool<T>::threadpool(int thread_number, int max_requests) : m_stop(false) {
     m_thread_number = thread_number > 0 ? thread_number : 8;
-    m_max_requests = max_requests > 0 ? max_requests : 5000;
+    m_max_requests = max_requests > 0 ? max_requests : 3000;
     m_threads = new pthread_t[m_thread_number];
     if(m_threads == NULL) {
         throw std::exception();
