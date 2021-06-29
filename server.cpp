@@ -13,12 +13,13 @@
 #include "http_conn.h"
 #include "thread_pool.h"
 #include "timeout.h"
-
-static const int MAX_FD = 10000;          //最大的文件描述符个数
+#include "redis.h"
+static const int MAX_FD = 10000;           //最大的文件描述符个数
 static const int MAX_EVENT_NUMBER = 5000; //监听的最大的事件数量
-static const int PORT = 80;               //服务器监听端口
-static const int TIMEOUT = 10;            //调用alarm函数的时间间隔
-timer_list<http_conn> t_list;
+static const int PORT = 80;                //服务器监听端口
+static const int TIMEOUT = 10;             //调用alarm函数的时间间隔
+
+timer_list<http_conn> t_list;              //用于清理不活跃连接
 
 /*添加信号捕捉*/
 void addsig(int sig, void(handler)(int)) {
@@ -104,6 +105,19 @@ int main() {
     //将监听的文件描述符添加到epoll对象中
     addfd(epollfd, listenfd, false);
     http_conn::m_epollfd = epollfd;
+    
+    Redis* accept_count = NULL;
+    try{
+        accept_count = new Redis();
+    } catch(...) {
+        exit(-1);
+    }
+
+    if(!accept_count->connect("127.0.0.1", 6379)) {
+        err_sys("redis");
+    }
+
+    accept_count->setnx("count", "0");
 
     while(true) {
         int num = epoll_wait(epollfd, events, MAX_EVENT_NUMBER, -1);
@@ -129,6 +143,8 @@ int main() {
                 users[connfd].init(connfd, client_address);
                 //创建对应的一个定时器加入链表
                 t_list.set_time(connfd, users + connfd);
+                accept_count->incr("count");
+                
             } else if(events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
                 //对方异常断开或者错误
                 t_list.delete_timer(sockfd);
@@ -156,7 +172,7 @@ int main() {
             }
         }    
     }
-
+    
     close(epollfd);
     close(listenfd);
     delete [] users;
