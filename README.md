@@ -37,6 +37,15 @@
 
 2.定时产生SIGALRM信号并进行捕捉，捕捉到该信号时调用函数清除长时间未操作的客户端连接
 
+# 压力测试
+本项目部署在单核的云服务器上，压测也使用同一服务器，能够应对约2000左右的并发访问。
+
+部署机器：
+![image](https://user-images.githubusercontent.com/75253499/117149713-0a330380-adea-11eb-96c1-fc03a55a8b42.png)
+
+压力测试：
+![image](https://user-images.githubusercontent.com/75253499/117152981-1cfb0780-aded-11eb-93c4-b8e50e9a23ea.png)
+
 
 # 测试页
 http://106.13.221.214/
