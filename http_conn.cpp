@@ -66,7 +66,6 @@ int http_conn::close_conn() {
         }
         user_count_lock.unlock();
     }
-    printf("close fd : %d \n", ret);
     return ret;
 }
 
@@ -99,11 +98,12 @@ bool http_conn::readall() {
 
 //一次性写完数据
 bool http_conn::writeall(){
-    int ret = 0;
     if(bytes_to_send == 0) {
         // 将要发送的字节为0，这一次响应结束
         return write_end();
     }
+
+    int ret = 0;
 
     while(1) {
         //发送写缓冲区中数据
@@ -120,25 +120,41 @@ bool http_conn::writeall(){
             break;
         }
     }
-
+    
     if(bytes_to_send == 0) {
         return write_end();
     }
 
-    int m_file_send = 0;
-    while(1) {
-        //发送文件
-        ret = write(m_sockfd, m_file_address + m_file_send, m_file_idx - m_file_send);
-        if(ret == -1) {
-            unmap();
-            return false;
+    if(m_execute_idx == 0) {
+        int m_file_send = 0;
+        while(1) {
+            //发送文件
+            ret = write(m_sockfd, m_file_address + m_file_send, m_file_idx - m_file_send);
+            if(ret == -1) {
+                unmap();
+                return false;
+            }
+            bytes_have_send += ret;
+            bytes_to_send -= ret;
+            m_file_send += ret;
+            if(bytes_to_send == 0) {
+                unmap();
+                return write_end();
+            }
         }
-        bytes_have_send += ret;
-        bytes_to_send -= ret;
-        m_file_send += ret;
-        if(bytes_to_send == 0) {
-            unmap();
-            return write_end();
+    } else {
+        int m_execute_send = 0;
+        while(1) {
+            ret = write(m_sockfd, m_execute_buf + m_execute_send, m_execute_idx - m_execute_send);
+            if(ret == -1) {
+                return false;
+            }
+            bytes_have_send += ret;
+            bytes_to_send -= ret;
+            m_execute_send += ret;
+            if(bytes_to_send == 0) {
+                return write_end();
+            }
         }
     }
 
@@ -178,10 +194,13 @@ void http_conn::init() {
     m_file_idx = 0;
     m_checked_idx = 0;
     m_write_idx = 0;
+    m_execute_idx = 0;
 
     bzero(m_read_buf, READ_BUF_SIZE);
     bzero(m_write_buf, READ_BUF_SIZE);
     bzero(m_real_file, FILENAME_LEN);
+    bzero(m_execute_buf, EXECUTE_SIZE);
+    bzero(m_parameter, PARAMETER_LEN);
     bzero(m_url, URL_LEN);
 }
 
@@ -281,15 +300,23 @@ bool http_conn::process_write(HTTP_CODE ret) {
         case FILE_REQUEST: {
             const char* ok_200 = "OK";
             add_status_line(200, ok_200);
-            add_headers(m_file_stat.st_size);
             m_file_idx = m_file_stat.st_size;
+            add_headers(m_file_idx);
             bytes_to_send = m_write_idx + m_file_idx;
+            return true;
+        }
+
+        case FILE_EXECUTE: {
+            const char* ok_200 = "OK";
+            add_status_line(200, ok_200);
+            add_headers(m_execute_idx);
+            bytes_to_send = m_write_idx + m_execute_idx;
             return true;
         }
 
         case UNIMPLEMENTED : {
             const char* error_501 = "Method Not Implemented";
-            add_status_line(403, error_501);
+            add_status_line(501, error_501);
             add_headers(err_information_len + 2 * strlen(error_501));
             if (!add_entity(error_501)) {
                 return false;
@@ -341,7 +368,7 @@ http_conn::HTTP_CODE http_conn::parse_request_line(char* text) {
     char method[12];
     int i = 0, len = strlen(text);
 
-    while(!isspace(*text) && (i < sizeof(method) - 1) && i < len) {
+    while(i < len && !isspace(*text) && (i < sizeof(method) - 1)) {
         method[i++] = *text++;
     }
     if(i == len) {
@@ -355,7 +382,7 @@ http_conn::HTTP_CODE http_conn::parse_request_line(char* text) {
         return UNIMPLEMENTED;//不支持
     }
 
-    while(isspace(*text) && i < len) {
+    while(i < len && isspace(*text)) {
 		++text;
         ++i;
 	}
@@ -364,11 +391,22 @@ http_conn::HTTP_CODE http_conn::parse_request_line(char* text) {
     }
 
     int j = 0;
-    while (!isspace(*text) && (i < URL_LEN - 1) && (i < len)) {
+    while ((i < len) && !isspace(*text) && ((*text) != '?') && (j < URL_LEN - 1)) {
 		m_url[j++] = *text++;
         ++i;
 	}
- 	m_url[i] = '\0';
+ 	m_url[j] = '\0';
+
+    j = 0;
+    if((*text) == '?') {
+        ++text;
+        ++i;
+        while((i < len) && !isspace(*text) && (j < PARAMETER_LEN - 1)) {
+            m_parameter[j++] = *text++;
+        }
+        m_parameter[j] = '\0';
+    }
+
     m_check_state = CHECK_HEADER;
     return PROCESSING;
 } 
@@ -423,8 +461,8 @@ http_conn::HTTP_CODE http_conn::parse_entity(char* text) {
     return PROCESSING;
 }
 
-// 当得到一个完整、正确的HTTP请求时就分析目标文件的属性，如果目标文件存在、对所有用户可读，
-// 且不是目录，则使用mmap将其映射到内存地址m_file_address处，并告知调用者获取文件成功
+// 当得到一个完整、正确的HTTP请求时就分析目标文件的属性，如果目标文件存在、对所有用户可读，且不是目录，
+// 若为可执行文件，对其执行就读取结果，否则使用mmap将其映射到内存地址m_file_address处，并告知调用者获取文件成功
 http_conn::HTTP_CODE http_conn::do_request() {
     //拼接基地址和url得到文件绝对路径
     strcpy(m_real_file, resources_dir);
@@ -451,12 +489,80 @@ http_conn::HTTP_CODE http_conn::do_request() {
         strcat(m_real_file, "/index.html");
     }
 
+    if ((m_file_stat.st_mode & S_IXUSR) ||  (m_file_stat.st_mode & S_IXGRP) || (m_file_stat.st_mode & S_IXOTH)) {
+        if(execute_file() ) {
+            return FILE_EXECUTE;
+        } else {
+            return INTERNAL_ERROR;
+        }
+	} else {
+        send_file();
+        return FILE_REQUEST;
+    }
+
+}
+
+//执行文件
+bool http_conn::execute_file() {
+	int output[2], input[2];
+	
+	if (pipe(output) < 0) {
+        return false;
+    }
+    if (pipe(input) < 0) {
+        return false;
+    }
+
+    pid_t pid;
+	
+    if ((pid = fork()) < 0 ) {
+        return false;
+    }
+	
+	if(pid == 0) {
+		//子进程
+		char meth_env[255];
+		char query_env[255];
+		dup2(output[1], 1);
+		dup2(input[0], 0);
+		close(output[0]);
+		close(input[1]);
+		
+		//设置环境变量
+		sprintf(meth_env, "REQUEST_METHOD=GET");
+		putenv(meth_env);
+		sprintf(query_env, "QUERY_STRING=%s", m_parameter);
+		putenv(query_env);
+		
+		execl(m_real_file, NULL);
+		exit(0);
+
+	} else {
+		//父进程
+        char c;
+		close(output[1]);
+		close(input[0]);
+
+        int j = 0;
+		while (j < EXECUTE_SIZE - 1 && read(output[0], &c, 1) > 0) {
+			m_execute_buf[j++] = c;
+		}
+        m_execute_buf[j] = '\0';
+        m_execute_idx = j;
+		close(output[0]);
+		close(input[1]);
+		waitpid(pid, NULL, 0);
+	}
+}
+
+
+//发送文件
+void http_conn::send_file() {
     // 以只读方式打开文件
     int fd = open( m_real_file, O_RDONLY );
     // 创建内存映射
     m_file_address = (char*)mmap(0, m_file_stat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
-    return FILE_REQUEST;
 }
 
 // 对内存映射区执行munmap操作

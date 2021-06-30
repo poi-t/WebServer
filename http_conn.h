@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <stdarg.h>
@@ -19,13 +20,14 @@
 #include <sys/uio.h>
 #include <ctype.h>
 #include "locker.h"
+#include "redis.h"
 
 class http_conn {
 public:
     http_conn() {}
     ~http_conn() {}
     void init(int sockfd, const sockaddr_in& addr);      //初始化新接收的连接
-    int close_conn();                                   //关闭连接
+    int close_conn();                                    //关闭连接
     bool readall();                                      //一次性读入数据
     bool writeall();                                     //一次性写出数据
     void process();                                      //处理客户端请求
@@ -54,7 +56,7 @@ private:
         INTERNAL_ERROR       : 服务器内部错误 (500)
         UNIMPLEMENTED        : 客户端使用了未实现的请求方法 (501)
     */
-    enum HTTP_CODE {PROCESSING, GET_REQUEST, BAD_REQUEST, FORBIDDEN_REQUEST, NO_RESOURCE, FILE_REQUEST, INTERNAL_ERROR, UNIMPLEMENTED};
+    enum HTTP_CODE {PROCESSING, GET_REQUEST, BAD_REQUEST, FORBIDDEN_REQUEST, NO_RESOURCE, FILE_REQUEST, FILE_EXECUTE, INTERNAL_ERROR, UNIMPLEMENTED};
 
     void init();                                         //初始化内部信息
     HTTP_CODE process_read();                            //解析HTTP请求
@@ -69,18 +71,21 @@ private:
     HTTP_CODE do_request();                              //解析文件
     
     // 这一组函数被process_write调用以填充HTTP应答
+    void send_file();                                    //发送文件
+    bool execute_file();                                 //执行文件
     void unmap();                                        //对内存映射区执行munmap操作
     bool add_response(const char* format, ...);          //往写缓冲中写入待发送的数据
     bool add_status_line(int status, const char* title); //写入状态行
     bool add_headers(int content_length);                //写入响应头
     bool add_entity(const char* content);                //写入响应实体
-    
     bool write_end();                                    //一次写结束的最终操作
 
     static const int FILENAME_LEN = 512;                 //文件名最大长度
-    static const int URL_LEN = 500;                      //url允许最大长度
+    static const int URL_LEN = 400;                      //url允许最大长度
+    static const int PARAMETER_LEN = 128;                //参数允许最大长度
     static const int READ_BUF_SIZE = 2048;               //读缓冲区大小
     static const int WRITE_BUF_SIZE = 2048;              //写缓冲区大小
+    static const int EXECUTE_SIZE = 1024;                 //可执行文件输出缓冲区大小
     static const int err_information_len = 97;           //错误处理报文基长度
     
     int m_sockfd;                                        //该HTTP连接的socket
@@ -97,10 +102,13 @@ private:
     int m_content_length;                                //HTTP请求报文主体总长度
     bool m_linger;                                       //HTTP请求是否要求保持连接
     char m_url[URL_LEN];                                 //客户请求的目标文件的文件名
+    char m_parameter[PARAMETER_LEN];                     //客户请求参数
     char m_real_file[FILENAME_LEN];                      //客户请求的目标文件的完整路径
 
     char m_write_buf[WRITE_BUF_SIZE];                    //写缓冲区
     int m_write_idx;                                     //写缓冲区中待发送的字节数
+    char m_execute_buf[EXECUTE_SIZE];                    //可执行文件输出缓冲区
+    int m_execute_idx;                                   //可执行文件输出大小
     char* m_file_address;                                //客户请求的目标文件被mmap到内存中的起始位置
     int m_file_idx;                                      //目标文件大小
     struct stat m_file_stat;                             //目标文件的状态
