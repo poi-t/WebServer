@@ -106,6 +106,7 @@ int main() {
     addfd(epollfd, listenfd, false);
     http_conn::m_epollfd = epollfd;
     
+    //创建一个redis对象进行连接
     Redis* accept_count = NULL;
     try{
         accept_count = new Redis();
@@ -117,6 +118,7 @@ int main() {
         err_sys("redis");
     }
 
+    //若是第一次启动，设置count为0
     accept_count->setnx("count", "0");
 
     while(true) {
