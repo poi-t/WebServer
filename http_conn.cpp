@@ -383,20 +383,20 @@ http_conn::HTTP_CODE http_conn::parse_request_line(char* text) {
     }
 
     while(i < len && isspace(*text)) {
-		++text;
+        ++text;
         ++i;
-	}
+    }
     if(i == len) {
         return BAD_REQUEST;
     }
 
     int j = 0;
     while ((i < len) && !isspace(*text) && ((*text) != '?') && (j < URL_LEN - 1)) {
-		m_url[j++] = *text++;
+        m_url[j++] = *text++;
         ++i;
-	}
- 	m_url[j] = '\0';
-
+    }
+    m_url[j] = '\0';
+ 	
     j = 0;
     if((*text) == '?') {
         ++text;
@@ -428,8 +428,8 @@ http_conn::HTTP_CODE http_conn::parse_headers(char* text) {
         // 处理Connection字段
         text += 11;
         while(isspace(*text)) {
-		    ++text;
-	    }
+            ++text;
+        }
         if(strncasecmp(text, "keep-alive", 10) == 0) {
             m_linger = true;
         }
@@ -437,15 +437,15 @@ http_conn::HTTP_CODE http_conn::parse_headers(char* text) {
         // 处理Content-Length字段
         text += 15;
         while(isspace(*text)) {
-		    ++text;
-	    }
+            ++text;
+        }
         m_content_length = atoi(text);
     } else if(strncasecmp(text, "Host:", 5) == 0) {
         //处理Host字段
         text += 5;
         while(isspace(*text)) {
-		    ++text;
-	    }
+            ++text;
+        }
         m_host = text;
     }
     return PROCESSING;
@@ -453,8 +453,7 @@ http_conn::HTTP_CODE http_conn::parse_headers(char* text) {
 
 // 不真正解析HTTP请求的消息体，只是判断它是否被完整的读入了
 http_conn::HTTP_CODE http_conn::parse_entity(char* text) {
-    if (m_read_idx >= (m_content_length + m_checked_idx))
-    {
+    if (m_read_idx >= (m_content_length + m_checked_idx)) {
         text[m_content_length] = '\0';
         return GET_REQUEST;
     }
@@ -495,7 +494,7 @@ http_conn::HTTP_CODE http_conn::do_request() {
         } else {
             return INTERNAL_ERROR;
         }
-	} else {
+    } else {
         send_file();
         return FILE_REQUEST;
     }
@@ -504,9 +503,9 @@ http_conn::HTTP_CODE http_conn::do_request() {
 
 //执行文件
 bool http_conn::execute_file() {
-	int output[2], input[2];
+    int output[2], input[2];
 	
-	if (pipe(output) < 0) {
+    if (pipe(output) < 0) {
         return false;
     }
     if (pipe(input) < 0) {
@@ -519,40 +518,37 @@ bool http_conn::execute_file() {
         return false;
     }
 	
-	if(pid == 0) {
-		//子进程
-		char meth_env[255];
-		char query_env[255];
-		dup2(output[1], 1);
-		dup2(input[0], 0);
-		close(output[0]);
-		close(input[1]);
-		
-		//设置环境变量
-		sprintf(meth_env, "REQUEST_METHOD=GET");
-		putenv(meth_env);
-		sprintf(query_env, "QUERY_STRING=%s", m_parameter);
-		putenv(query_env);
-		
-		execl(m_real_file, NULL);
-		exit(0);
+    if(pid == 0) {
+        //子进程
+        char meth_env[255];
+        char query_env[255];
+        dup2(output[1], 1);
+        dup2(input[0], 0);
+        close(output[0]);
+        close(input[1]);
+        //设置环境变量
+        sprintf(meth_env, "REQUEST_METHOD=GET");
+        putenv(meth_env);
+        sprintf(query_env, "QUERY_STRING=%s", m_parameter);
+        putenv(query_env);
 
-	} else {
-		//父进程
+        execl(m_real_file, NULL);
+        exit(0);
+    } else {
+        //父进程
         char c;
-		close(output[1]);
-		close(input[0]);
-
+        close(output[1]);
+        close(input[0]);
         int j = 0;
-		while (j < EXECUTE_SIZE - 1 && read(output[0], &c, 1) > 0) {
-			m_execute_buf[j++] = c;
-		}
+        while (j < EXECUTE_SIZE - 1 && read(output[0], &c, 1) > 0) {
+            m_execute_buf[j++] = c;
+        }
         m_execute_buf[j] = '\0';
         m_execute_idx = j;
-		close(output[0]);
-		close(input[1]);
-		waitpid(pid, NULL, 0);
-	}
+        close(output[0]);
+        close(input[1]);
+        waitpid(pid, NULL, 0);
+    }
 }
 
 
@@ -605,8 +601,8 @@ bool http_conn::add_headers(int content_len) {
 bool http_conn::add_entity( const char* content ) {
     add_response("<html>\r\n");
     add_response("<head><title>%s</title></head>\r\n", content);
-	add_response("<body>\r\n");
-	add_response("<div style=\"text-align:center;\">%s</div>\r\n", content);
+    add_response("<body>\r\n");
+    add_response("<div style=\"text-align:center;\">%s</div>\r\n", content);
     add_response("</body>\r\n");
     add_response("<html>\r\n");
     return true;
