@@ -41,6 +41,10 @@ public:
         redisCommand(_connect, "SET %s %s", key.c_str(), value.c_str());
     }
     
+    void set(string key, string timeout, string value) {
+        redisCommand(_connect, "SET %s %s %s", key.c_str(), timeout.c_str(), value.c_str());
+    }
+    
     void incr(string key) {
         redisCommand(_connect, "incr %s", key.c_str());
     }
