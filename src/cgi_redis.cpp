@@ -17,7 +17,7 @@ int main() {
         printf("        <title>访问量</title>\n");
         printf("    </head>\n");
         printf("    <body>\n");
-        printf("    <h1 style=\"text-align:center;\">当前总访问量</h1>\n");
+        printf("    <h1 style=\"text-align:center;\">当前总访问量（以连接次数计）</h1>\n");
         printf("    <div style=\"text-align:center;height：120px;font-size:28px\">%s</div>\n", count);
         printf("</body>\n");
         printf("</html>\n");
